@@ -11,15 +11,19 @@ from sqlalchemy.sql.schema import MetaData, Table
 
 
 def make_session(connection_string):
-    engine = create_engine(connection_string, echo=False,
-                           convert_unicode=True)
-    Session = sessionmaker(bind=engine)
+    #SQLALCHEMY_ENGINE_OPTIONS={'connect_args': {'connection_timeout': -1, 'options': '-c statement_timeout=5'}}
+    engine = create_engine(connection_string, echo=False, convert_unicode=True,
+		execution_options={"timeout": 32.0,
+                                   "statement_timeout": 32.0,
+                                   "query_timeout": 32.0,
+                                   "execution_timeout": 32.0})
+    Session = sessionmaker(bind=engine, expire_on_commit=True)
     return Session(), engine
 
 
 class DBDiff(object):
 
-    def __init__(self, firstdb, seconddb, chunk_size=10000, count_only=False):
+    def __init__(self, firstdb, seconddb, chunk_size=10000, count_only=False, full_data=False):
         firstsession, firstengine = make_session(firstdb)
         secondsession, secondengine = make_session(seconddb)
         self.firstsession = firstsession
@@ -32,8 +36,53 @@ class DBDiff(object):
         self.secondinspector = inspect(secondengine)
         self.chunk_size = int(chunk_size)
         self.count_only = count_only
+        self.full_data = full_data
+
+    def reset(self):
+        self.firstengine.dispose()
+        self.secondengine.dispose()
+        self.__init__(firstdb,seconddb,self.chunk_size,self.count_only )
 
     def diff_table_data(self, tablename):
+        try:
+            firsttable = Table(tablename, self.firstmeta, autoload=True)
+            secondtable = Table(tablename, self.secondmeta, autoload=True)
+            pk = ",".join(self.firstinspector.get_pk_constraint(tablename)[
+                              'constrained_columns'])
+            if not pk:
+                return None, "no primary key(s) on this table." \
+                             " Comparision is not possible."
+        except NoSuchTableError:
+            return False, "table is missing"
+
+        SQL_TEMPLATE_HASH = f"""
+        SELECT md5(array_agg(md5((t.*)::varchar))::varchar) hash
+        FROM (
+            SELECT * FROM (
+                (SELECT * FROM {tablename} ORDER BY {pk} limit :row_limit)
+                UNION
+                (SELECT * FROM {tablename} ORDER BY {pk} DESC limit :row_limit)
+                )  as topbottomselect order by {pk}
+            ) AS t;
+                        """
+        #print(SQL_TEMPLATE_HASH)
+        position = 0
+
+        firstresult = self.firstsession.execute(
+                SQL_TEMPLATE_HASH,
+                {"row_limit": self.chunk_size,
+                 "row_offset": position}).fetchone()
+        secondresult = self.secondsession.execute(
+                SQL_TEMPLATE_HASH,
+                {"row_limit": self.chunk_size,
+                 "row_offset": position}).fetchone()
+        if firstresult != secondresult:
+           return False, f"data is different - position {position} -" \
+                         f" {position + self.chunk_size}"
+        position += self.chunk_size
+        return True, "data and count(implicit) is identical."
+
+    def diff_table_data_complete(self, tablename):
         try:
             firsttable = Table(tablename, self.firstmeta, autoload=True)
             firstquery = self.firstsession.query(
@@ -53,7 +102,6 @@ class DBDiff(object):
             if not pk:
                 return None, "no primary key(s) on this table." \
                              " Comparision is not possible."
-
         except NoSuchTableError:
             return False, "table is missing"
 
@@ -65,7 +113,6 @@ class DBDiff(object):
                 ORDER BY {pk} limit :row_limit offset :row_offset
             ) AS t;
                         """
-
         position = 0
 
         while position <= firstquery.count():
@@ -81,7 +128,7 @@ class DBDiff(object):
                 return False, f"data is different - position {position} -" \
                               f" {position + self.chunk_size}"
             position += self.chunk_size
-        return True, "data is identical."
+        return True, "data and count is identical."
 
     def get_all_sequences(self):
         GET_SEQUENCES_SQL = """SELECT c.relname FROM 
@@ -142,11 +189,16 @@ class DBDiff(object):
             tables = sorted(
                 self.firstinspector.get_table_names(schema="public"))
             for table in tables:
+                #if table not in ['financialtransaction','defeatedcategoryproposal','transactionrawstorage']:
+                #     continue
                 with Halo(
                         text=f"Analysing table {table}. "
                              f"[{tables.index(table) + 1}/{len(tables)}]",
                         spinner='dots') as spinner:
-                    result, message = self.diff_table_data(table)
+                    if not self.full_data:
+                        result, message = self.diff_table_data(table)
+                    else:
+                        result, message = self.diff_table_data_complete(table)
                     if result is True:
                         spinner.succeed(f"{table} - {message}")
                     elif result is None:

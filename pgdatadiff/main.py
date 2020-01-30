@@ -1,17 +1,18 @@
 """
 Usage:
-  pgdatadiff --firstdb=<firstconnectionstring> --seconddb=<secondconnectionstring> [--only-data|--only-sequences] [--count-only] [--chunk-size=<size>]
+  pgdatadiff --firstdb=<firstconnectionstring> --seconddb=<secondconnectionstring> [--only-data|--only-sequences] [--count-only] [--chunk-size=<size>] [--full-data]
   pgdatadiff --version
 
 Options:
-  -h --help          Show this screen.
-  --version          Show version.
+  -h --help             Show this screen.
+  --version             Show version.
   --firstdb=postgres://postgres:password@localhost/firstdb        The connection string of the first DB
   --seconddb=postgres://postgres:password@localhost/seconddb         The connection string of the second DB
-  --only-data        Only compare data, exclude sequences
-  --only-sequences   Only compare seqences, exclude data
-  --count-only       Do a quick test based on counts alone
-  --chunk-size=10000       The chunk size when comparing data [default: 10000]
+  --only-data           Only compare data, exclude sequences
+  --only-sequences      Only compare seqences, exclude data
+  --count-only          Do a quick test based on counts alone
+  --full-data           Compare full data (default is a top/bottom comparison)
+  --chunk-size=10000    The chunk size when comparing data [default: 10000]
 """
 
 import pkg_resources
@@ -33,7 +34,8 @@ def main():
 
     differ = DBDiff(first_db_connection_string, second_db_connection_string,
                     chunk_size=arguments['--chunk-size'],
-                    count_only=arguments['--count-only'])
+                    count_only=arguments['--count-only'],
+                    full_data=arguments['--full-data'])
 
     if not arguments['--only-sequences']:
         if differ.diff_all_table_data():
