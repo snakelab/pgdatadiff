@@ -9,7 +9,6 @@ from sqlalchemy.inspection import inspect
 from sqlalchemy.orm.session import sessionmaker
 from sqlalchemy.sql.schema import MetaData, Table
 
-
 def make_session(connection_string):
     #SQLALCHEMY_ENGINE_OPTIONS={'connect_args': {'connection_timeout': -1, 'options': '-c statement_timeout=5'}}
     engine = create_engine(connection_string, echo=False, convert_unicode=True,

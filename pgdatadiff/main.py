@@ -21,7 +21,6 @@ from fabulous.color import red
 from pgdatadiff.pgdatadiff import DBDiff
 from docopt import docopt
 
-
 def main():
     arguments = docopt(
         __doc__, version=pkg_resources.require("pgdatadiff")[0].version)
