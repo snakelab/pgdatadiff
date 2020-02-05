@@ -10,9 +10,8 @@ from sqlalchemy.orm.session import sessionmaker
 from sqlalchemy.sql.schema import MetaData, Table
 
 def make_session(connection_string):
-    #SQLALCHEMY_ENGINE_OPTIONS={'connect_args': {'connection_timeout': -1, 'options': '-c statement_timeout=5'}}
     engine = create_engine(connection_string, echo=False, convert_unicode=True,
-		execution_options={"timeout": 32.0,
+                execution_options={"timeout": 32.0,
                                    "statement_timeout": 32.0,
                                    "query_timeout": 32.0,
                                    "execution_timeout": 32.0})
@@ -22,7 +21,7 @@ def make_session(connection_string):
 
 class DBDiff(object):
 
-    def __init__(self, firstdb, seconddb, chunk_size=10000, count_only=False, full_data=False):
+    def __init__(self, firstdb, seconddb, chunk_size=10000, count_only=False, full_data=False, threads=0, thread_number=0):
         firstsession, firstengine = make_session(firstdb)
         secondsession, secondengine = make_session(seconddb)
         self.firstsession = firstsession
@@ -36,11 +35,14 @@ class DBDiff(object):
         self.chunk_size = int(chunk_size)
         self.count_only = count_only
         self.full_data = full_data
+        self.threads = threads
+        self.thread_number = thread_number
 
-    def reset(self):
-        self.firstengine.dispose()
-        self.secondengine.dispose()
-        self.__init__(firstdb,seconddb,self.chunk_size,self.count_only )
+    def divide_chunks(l, n):
+        # looping till length l
+        for i in range(0, len(l), n):
+            yield l[i:i + n]
+
 
     def diff_table_data(self, tablename):
         try:
@@ -64,7 +66,6 @@ class DBDiff(object):
                 )  as topbottomselect order by {pk}
             ) AS t;
                         """
-        #print(SQL_TEMPLATE_HASH)
         position = 0
 
         firstresult = self.firstsession.execute(
@@ -75,6 +76,12 @@ class DBDiff(object):
                 SQL_TEMPLATE_HASH,
                 {"row_limit": self.chunk_size,
                  "row_offset": position}).fetchone()
+
+
+        #-- to be able to run long queries
+        self.firstsession.close()
+        self.secondsession.close()
+
         if firstresult != secondresult:
            return False, f"data is different - position {position} -" \
                          f" {position + self.chunk_size}"
@@ -87,8 +94,12 @@ class DBDiff(object):
             firstquery = self.firstsession.query(
                 firsttable)
             secondtable = Table(tablename, self.secondmeta, autoload=True)
-            secondquery = self.secondsession.query(
-                secondtable)
+            secondquery = self.secondsession.query(secondtable)
+
+            #-- to be able to run long queries
+            self.firstsession.close()
+            self.secondsession.close()
+
             if firstquery.count() != secondquery.count():
                 return False, f"counts are different" \
                               f" {firstquery.count()} != {secondquery.count()}"
@@ -123,6 +134,10 @@ class DBDiff(object):
                 SQL_TEMPLATE_HASH,
                 {"row_limit": self.chunk_size,
                  "row_offset": position}).fetchone()
+            #-- to be able to run long queries
+            self.firstsession.close()
+            self.secondsession.close()
+
             if firstresult != secondresult:
                 return False, f"data is different - position {position} -" \
                               f" {position + self.chunk_size}"
@@ -130,7 +145,7 @@ class DBDiff(object):
         return True, "data and count is identical."
 
     def get_all_sequences(self):
-        GET_SEQUENCES_SQL = """SELECT c.relname FROM 
+        GET_SEQUENCES_SQL = """SELECT c.relname FROM
         pg_class c WHERE c.relkind = 'S';"""
         return [x[0] for x in
                 self.firstsession.execute(GET_SEQUENCES_SQL).fetchall()]
@@ -158,7 +173,11 @@ class DBDiff(object):
                           f" the second({firstvalue} vs {secondvalue})."
         return True, f"sequences are identical- ({firstvalue})."
 
-    def diff_all_sequences(self):
+    def diff_all_sequences(self, thread_number):
+        # run just once
+        if thread_number > 0:
+            return 0
+
         print(bold(red('Starting sequence analysis.')))
         sequences = sorted(self.get_all_sequences())
         failures = 0
@@ -180,19 +199,45 @@ class DBDiff(object):
             return 1
         return 0
 
-    def diff_all_table_data(self):
+    def divide_chunks(self, l, n):
+
+        count = int(round(len(l) / n))
+
+        # looping till length l
+        for i in range(0, len(l), count):
+           yield l[i:i + count]
+
+	#return
+
+    def get_table_names_thread(self, thread_number):
+
+        table_names = self.firstinspector.get_table_names(schema = "public")
+
+        x = list(self.divide_chunks(table_names, self.threads))
+        #print(x)
+        #print("--%s----%s----" % (self.threads, thread_number) )
+        #print("THREAD_NUMBER=>%s" % thread_number)
+        #print(x[thread_number])
+
+        return x[thread_number]
+        #return table_names
+
+
+    def diff_all_table_data(self, thread_number):
         failures = 0
-        print(bold(red('Starting table analysis.')))
+        #print(bold(red('Starting table analysis [%s/%s]' % ((thread_number+1), self.threads))))
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", category=sa_exc.SAWarning)
+
+            #tables = sorted(self.firstinspector.get_table_names(schema="public"))
             tables = sorted(
-                self.firstinspector.get_table_names(schema="public"))
+                self.get_table_names_thread(thread_number))
+
             for table in tables:
-                #if table not in ['financialtransaction','defeatedcategoryproposal','transactionrawstorage']:
-                #     continue
                 with Halo(
-                        text=f"Analysing table {table}. "
-                             f"[{tables.index(table) + 1}/{len(tables)}]",
+                        #text=f"Analysing table {table}. "
+                        #     f"[{tables.index(table) + 1}/{len(tables)}]",
+                        text=f"",
                         spinner='dots') as spinner:
                     if not self.full_data:
                         result, message = self.diff_table_data(table)
@@ -205,7 +250,7 @@ class DBDiff(object):
                     else:
                         failures += 1
                         spinner.fail(f"{table} - {message}")
-        print(bold(green('Table analysis complete.')))
+        #print(bold(green('Table analysis complete [%s/%s]' % ((thread_number+1), self.threads))))
         if failures > 0:
             return 1
         return 0
